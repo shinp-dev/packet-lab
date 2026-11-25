@@ -17,7 +17,7 @@ public class PacketCaptureActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         if (savedInstanceState != null || !PacketOverlayService.isStartPending()
                 || CaptureService.isServiceActive()) {
-            finish();
+            finishAndRemoveTask();
             return;
         }
         TextView message = new TextView(this);
@@ -30,15 +30,15 @@ public class PacketCaptureActivity extends AppCompatActivity {
             PacketOverlayService.startResult(success);
             if (!success)
                 Toast.makeText(this, "記録を開始できませんでした", Toast.LENGTH_SHORT).show();
-            finish();
+            finishAndRemoveTask();
         });
         if (Utils.getRunningVpn(this) != null) {
             new AlertDialog.Builder(this)
                 .setTitle(R.string.active_vpn_detected)
                 .setMessage(R.string.disconnect_vpn_confirm)
                 .setPositiveButton(R.string.ok, (d, w) -> begin())
-                .setNegativeButton(R.string.cancel_action, (d, w) -> finish())
-                .setOnCancelListener(d -> finish())
+                .setNegativeButton(R.string.cancel_action, (d, w) -> finishAndRemoveTask())
+                .setOnCancelListener(d -> finishAndRemoveTask())
                 .show();
         } else {
             begin();
@@ -47,7 +47,7 @@ public class PacketCaptureActivity extends AppCompatActivity {
 
     private void begin() {
         if (!PacketOverlayService.isStartPending() || CaptureService.isServiceActive()) {
-            finish();
+            finishAndRemoveTask();
             return;
         }
         PCAPdroid.getInstance().setLoadedPcapBasename(null);

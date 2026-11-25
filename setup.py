@@ -56,7 +56,7 @@ def prepare(skip_submodules=False):
         ('android:name=".activities.CaptureCtrl"\n            android:theme="@style/AppTheme.Floating"\n            android:launchMode="singleTop"\n            android:exported="true" />',
          'android:name=".activities.CaptureCtrl"\n            android:theme="@style/AppTheme.Floating"\n            android:launchMode="singleTop"\n            android:exported="false" />'),
         ('        <receiver\n            android:name=".BootReceiver"\n            android:exported="false">\n            <intent-filter>\n                <action android:name="android.intent.action.BOOT_COMPLETED"/>\n                <action android:name="android.intent.action.QUICKBOOT_POWERON"/>\n            </intent-filter>\n        </receiver>',
-         '        <activity android:name=".PacketCaptureActivity" android:exported="false"\n            android:theme="@style/AppTheme.Floating" android:excludeFromRecents="true" />\n        <service android:name=".PacketOverlayService" android:exported="false"\n            android:foregroundServiceType="specialUse">\n            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"\n                android:value="User-visible floating capture controls"/>\n        </service>'),
+         '        <activity android:name=".PacketCaptureActivity" android:exported="false"\n            android:theme="@style/AppTheme.Floating" android:excludeFromRecents="true"\n            android:taskAffinity="${applicationId}.captureConsent" />\n        <service android:name=".PacketOverlayService" android:exported="false"\n            android:foregroundServiceType="specialUse">\n            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"\n                android:value="User-visible floating capture controls"/>\n        </service>'),
         ('            <intent-filter>\n                <action android:name="android.net.VpnService" />',
          '            <meta-data android:name="android.net.VpnService.SUPPORTS_ALWAYS_ON" android:value="false"/>\n            <intent-filter>\n                <action android:name="android.net.VpnService" />'),
     ])
@@ -102,7 +102,7 @@ def prepare(skip_submodules=False):
 
     patch(JAVA + "/CaptureHelper.java", [
         ('        ContextCompat.startForegroundService(mContext, intent);\n        if(mListener != null)\n            mListener.onCaptureStartResult(true);',
-         '        try {\n            ContextCompat.startForegroundService(mContext, intent);\n        } catch (RuntimeException e) {\n            Log.e(TAG, "Cannot start capture service", e);\n            captureStartFailed();\n            return;\n        }\n        if(mListener != null)\n            mListener.onCaptureStartResult(true);'),
+         '        if (mContext instanceof PacketCaptureActivity && !PacketOverlayService.isStartPending()) {\n            captureStartFailed();\n            return;\n        }\n        try {\n            ContextCompat.startForegroundService(mContext, intent);\n        } catch (RuntimeException e) {\n            Log.e(TAG, "Cannot start capture service", e);\n            captureStartFailed();\n            return;\n        }\n        if(mListener != null)\n            mListener.onCaptureStartResult(true);'),
     ])
     for p in (ROOT / "overlay-src").glob("*.java"):
         shutil.copyfile(p, TARGET / JAVA / p.name)

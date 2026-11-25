@@ -14,6 +14,7 @@ import android.graphics.Color;
 import android.graphics.PixelFormat;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
+import android.net.VpnService;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
@@ -223,8 +224,23 @@ public class PacketOverlayService extends Service implements LifecycleOwner {
                 pendingUntil = SystemClock.elapsedRealtime() + 120000;
                 requested = false;
                 try {
-                    startActivity(new Intent(this, PacketCaptureActivity.class)
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                    if (VpnService.prepare(this) == null && Utils.getRunningVpn(this) == null
+                            && Utils.hasLocalNetworkPermission(this)) {
+                        PCAPdroid.getInstance().setLoadedPcapBasename(null);
+                        PCAPdroid.getInstance().setIsDecryptingPcap(false);
+                        VpnReconnectService.stopService();
+                        CaptureHelper helper = new CaptureHelper(this);
+                        helper.setListener(success -> {
+                            startResult(success);
+                            if (!success)
+                                Toast.makeText(this, "本体アプリから開始してください", Toast.LENGTH_SHORT).show();
+                            render();
+                        });
+                        helper.startCapture(PacketLabConfig.localSettings(this));
+                    } else {
+                        startActivity(new Intent(this, PacketCaptureActivity.class)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                    }
                 } catch (RuntimeException e) {
                     startResult(false);
                     Toast.makeText(this, "本体アプリから開始してください", Toast.LENGTH_SHORT).show();
@@ -299,6 +315,7 @@ public class PacketOverlayService extends Service implements LifecycleOwner {
     private final Runnable tick = new Runnable() {
         @Override public void run() {
             if (!Settings.canDrawOverlays(PacketOverlayService.this)) {
+                if (CaptureService.isServiceActive()) CaptureService.stopService();
                 stopSelf();
                 return;
             }
@@ -355,6 +372,7 @@ public class PacketOverlayService extends Service implements LifecycleOwner {
     @Override
     public void onDestroy() {
         handler.removeCallbacksAndMessages(null);
+        startResult(false);
         lifecycle.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY);
         if (attached) {
             try { wm.removeView(panel); } catch (RuntimeException ignored) {}

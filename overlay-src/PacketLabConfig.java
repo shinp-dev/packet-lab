@@ -28,7 +28,6 @@ public final class PacketLabConfig {
                     .edit().putBoolean(DETAIL, which == 1).apply();
                 dialog.dismiss();
             })
-            .setMessage(null)
             .setNegativeButton(android.R.string.cancel, null)
             .show();
     }
