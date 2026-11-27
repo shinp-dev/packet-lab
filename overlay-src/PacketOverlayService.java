@@ -32,6 +32,12 @@ import android.widget.TextView;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import com.emanuelef.remote_capture.model.AppStats;
+import com.emanuelef.remote_capture.model.ConnectionDescriptor;
+import android.text.SpannableString;
+import android.text.Spanned;
+import android.text.style.RelativeSizeSpan;
+import java.util.HashMap;
+import java.util.Map;
 import androidx.core.content.ContextCompat;
 import androidx.lifecycle.Lifecycle;
 import androidx.lifecycle.LifecycleOwner;
@@ -54,7 +60,10 @@ public class PacketOverlayService extends Service implements LifecycleOwner {
     private ConnectionsRegister watchRegister;
     private String watchPackage = "";
     private int watchUid = -1;
-    private long watchTx, watchRx, trafficUntil;
+    private static final long TRAFFIC_VISIBLE_MS = 700;
+    private long watchTx, watchRx;
+    private Map<Integer, long[]> watchConnections = new HashMap<>();
+    private final Runnable dismissTraffic = () -> hideTraffic();
     private String watchLabel = "";
     private Button record;
     private Button close;
@@ -221,7 +230,7 @@ public class PacketOverlayService extends Service implements LifecycleOwner {
         traffic = new TextView(this);
         traffic.setTextColor(Color.WHITE);
         traffic.setTextSize(12);
-        traffic.setMaxLines(2);
+        traffic.setMaxLines(4);
         traffic.setPadding(dp(8), dp(4), dp(8), dp(4));
         traffic.setMaxWidth(dp(228));
         traffic.setVisibility(View.GONE);
@@ -328,6 +337,7 @@ public class PacketOverlayService extends Service implements LifecycleOwner {
             }
             closing = closePanel;
             stopping = true;
+            hideTraffic();
             stoppingSince = SystemClock.elapsedRealtime();
             CaptureService.stopService();
             render();
@@ -349,7 +359,7 @@ public class PacketOverlayService extends Service implements LifecycleOwner {
     };
 
     private void hideTraffic() {
-        trafficUntil = 0;
+        handler.removeCallbacks(dismissTraffic);
         if (traffic != null && traffic.getVisibility() != View.GONE) {
             traffic.setVisibility(View.GONE);
             panel.post(() -> { if (attached) move(); });
@@ -361,6 +371,7 @@ public class PacketOverlayService extends Service implements LifecycleOwner {
         watchPackage = "";
         watchUid = -1;
         watchTx = watchRx = 0;
+        watchConnections.clear();
         hideTraffic();
     }
 
@@ -383,14 +394,36 @@ public class PacketOverlayService extends Service implements LifecycleOwner {
             return;
         }
         long tx, rx;
-        // Upstream writers synchronize on this register. Copy the counters under that lock.
+        Map<Integer, long[]> next = new HashMap<>();
+        String endpoint = null;
+        long newest = Long.MIN_VALUE;
+        int newestId = Integer.MIN_VALUE;
+        boolean sameTarget = watchRegister == reg && watchPackage.equals(pkg) && watchUid == app.uid;
+        // Copy the counters and select the latest actually changed connection under the register lock.
         synchronized (reg) {
             AppStats stats = reg.getAppStats(app.uid);
             tx = stats == null ? 0 : stats.sentBytes;
             rx = stats == null ? 0 : stats.rcvdBytes;
+            int count = reg.getConnCount();
+            for (int i = 0; i < count; i++) {
+                ConnectionDescriptor conn = reg.getConn(i);
+                if (conn == null || conn.uid != app.uid) continue;
+                long[] old = sameTarget ? watchConnections.get(conn.incr_id) : null;
+                next.put(conn.incr_id, new long[]{conn.first_seen, conn.sent_bytes, conn.rcvd_bytes});
+                boolean known = old != null && old[0] == conn.first_seen;
+                boolean changed = known ? conn.sent_bytes > old[1] || conn.rcvd_bytes > old[2]
+                        : conn.sent_bytes > 0 || conn.rcvd_bytes > 0;
+                if (changed && (conn.last_seen > newest
+                        || (conn.last_seen == newest && conn.incr_id > newestId))) {
+                    newest = conn.last_seen;
+                    newestId = conn.incr_id;
+                    endpoint = protocolLabel(conn) + "  " +
+                            (conn.dst_ip == null || conn.dst_ip.isEmpty() ? "IP不明" : conn.dst_ip);
+                }
+            }
         }
-        if (watchRegister != reg || !watchPackage.equals(pkg) || watchUid != app.uid
-                || tx < watchTx || rx < watchRx) {
+        watchConnections = next;
+        if (!sameTarget || tx < watchTx || rx < watchRx) {
             // Baseline a newly selected app/session; never announce historical traffic.
             watchRegister = reg;
             watchPackage = pkg;
@@ -401,20 +434,40 @@ public class PacketOverlayService extends Service implements LifecycleOwner {
             hideTraffic();
             return;
         }
-        boolean sent = tx > watchTx, received = rx > watchRx;
-        watchTx = tx; watchRx = rx;
-        long now = SystemClock.elapsedRealtime();
-        if (sent || received) {
-            trafficUntil = now + 1800;
-            traffic.setText(watchLabel + "：通信あり\n" + (sent && received ? "送受信" : sent ? "送信" : "受信"));
-            traffic.setBackgroundColor(0xFF177B46);
-            if (traffic.getVisibility() != View.VISIBLE) {
-                traffic.setVisibility(View.VISIBLE);
-                panel.post(() -> { if (attached) move(); });
-            }
-        } else if (now >= trafficUntil) {
-            hideTraffic();
+        boolean changed = tx > watchTx || rx > watchRx;
+        watchTx = tx;
+        watchRx = rx;
+        if (!changed) return;
+
+        // A connection may have already left the bounded register. Do not guess its endpoint.
+        String title = watchLabel + "：通信あり";
+        String detail = endpoint == null ? "プロトコル・接続先IP不明" : endpoint;
+        SpannableString text = new SpannableString(title + "\n" + detail);
+        text.setSpan(new RelativeSizeSpan(0.83f), title.length() + 1, text.length(),
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        traffic.setText(text);
+        traffic.setBackgroundColor(0xFF177B46);
+        if (traffic.getVisibility() != View.VISIBLE) {
+            traffic.setVisibility(View.VISIBLE);
+            panel.post(() -> { if (attached) move(); });
         }
+        handler.removeCallbacks(dismissTraffic);
+        handler.postDelayed(dismissTraffic, TRAFFIC_VISIBLE_MS);
+    }
+
+    private static String protocolLabel(ConnectionDescriptor conn) {
+        String transport;
+        switch (conn.ipproto) {
+            case 6: transport = "TCP"; break;
+            case 17: transport = "UDP"; break;
+            case 1: transport = "ICMP"; break;
+            case 58: transport = "ICMPv6"; break;
+            default: transport = "IP/" + conn.ipproto; break;
+        }
+        String app = conn.l7proto == null ? "" : conn.l7proto.trim();
+        if (app.isEmpty() || app.equalsIgnoreCase("unknown") || app.equalsIgnoreCase(transport))
+            return transport;
+        return transport + "/" + app;
     }
 
     private void render() {
