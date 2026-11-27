@@ -33,9 +33,9 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import com.emanuelef.remote_capture.model.AppStats;
 import com.emanuelef.remote_capture.model.ConnectionDescriptor;
-import android.text.SpannableString;
-import android.text.Spanned;
-import android.text.style.RelativeSizeSpan;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
 import java.util.HashMap;
 import java.util.Map;
 import androidx.core.content.ContextCompat;
@@ -56,14 +56,28 @@ public class PacketOverlayService extends Service implements LifecycleOwner {
     private WindowManager.LayoutParams params;
     private LinearLayout panel;
     private LinearLayout controls;
-    private TextView traffic;
+    private LinearLayout traffic;
+    private TextView trafficTitle;
+    private LinearLayout trafficRows;
     private ConnectionsRegister watchRegister;
     private String watchPackage = "";
     private int watchUid = -1;
     private static final long TRAFFIC_VISIBLE_MS = 700;
+    private static final int MAX_TRAFFIC_ROWS = 5;
+    private static final long TRAFFIC_STAGGER_MS = 65;
+    private final Object trafficToken = new Object();
     private long watchTx, watchRx;
     private Map<Integer, long[]> watchConnections = new HashMap<>();
-    private final Runnable dismissTraffic = () -> hideTraffic();
+    private static final class TrafficEvent {
+        final long time;
+        final int id;
+        final String endpoint;
+        TrafficEvent(long time, int id, String endpoint) {
+            this.time = time;
+            this.id = id;
+            this.endpoint = endpoint;
+        }
+    }
     private String watchLabel = "";
     private Button record;
     private Button close;
@@ -141,6 +155,7 @@ public class PacketOverlayService extends Service implements LifecycleOwner {
         }
         CaptureService.observeStatus(this, status -> {
             started = status == CaptureService.ServiceStatus.STARTED;
+            if (!started && !CaptureService.isServiceActive()) resetWatch();
             if (started || requested) startResult(false);
             render();
         });
@@ -227,13 +242,19 @@ public class PacketOverlayService extends Service implements LifecycleOwner {
         add(record, 94);
         add(results, 54);
         add(close, 36);
-        traffic = new TextView(this);
-        traffic.setTextColor(Color.WHITE);
-        traffic.setTextSize(12);
-        traffic.setMaxLines(4);
-        traffic.setPadding(dp(8), dp(4), dp(8), dp(4));
-        traffic.setMaxWidth(dp(228));
+        traffic = new LinearLayout(this);
+        traffic.setOrientation(LinearLayout.VERTICAL);
         traffic.setVisibility(View.GONE);
+        trafficTitle = new TextView(this);
+        trafficTitle.setTextColor(Color.WHITE);
+        trafficTitle.setTextSize(11);
+        trafficTitle.setMaxLines(1);
+        trafficTitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        trafficTitle.setPadding(dp(5), dp(2), dp(5), 0);
+        traffic.addView(trafficTitle);
+        trafficRows = new LinearLayout(this);
+        trafficRows.setOrientation(LinearLayout.VERTICAL);
+        traffic.addView(trafficRows);
         panel.addView(traffic, new LinearLayout.LayoutParams(dp(236), LinearLayout.LayoutParams.WRAP_CONTENT));
         params = new WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
@@ -359,11 +380,44 @@ public class PacketOverlayService extends Service implements LifecycleOwner {
     };
 
     private void hideTraffic() {
-        handler.removeCallbacks(dismissTraffic);
+        handler.removeCallbacksAndMessages(trafficToken);
+        if (trafficRows != null) trafficRows.removeAllViews();
         if (traffic != null && traffic.getVisibility() != View.GONE) {
             traffic.setVisibility(View.GONE);
             panel.post(() -> { if (attached) move(); });
         }
+    }
+
+    private void showTrafficEvent(String endpoint) {
+        if (!attached || stopping || !CaptureService.isServiceActive()
+                || !watchPackage.equals(PacketLabConfig.watchedPackage(this))
+                || watchRegister != CaptureService.getConnsRegister()) return;
+        while (trafficRows.getChildCount() >= MAX_TRAFFIC_ROWS) {
+            // Expiration callbacks for removed rows are harmless and still bounded in time.
+            trafficRows.removeViewAt(trafficRows.getChildCount() - 1);
+        }
+        TextView row = new TextView(this);
+        row.setTextColor(Color.WHITE);
+        row.setTextSize(10);
+        row.setMaxLines(2);
+        row.setPadding(dp(5), dp(2), dp(5), dp(2));
+        row.setText(endpoint);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setCornerRadius(dp(3));
+        bg.setColor(0xFF177B46);
+        row.setBackground(bg);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.topMargin = dp(2);
+        trafficRows.addView(row, 0, lp);
+        trafficTitle.setText(watchLabel + "：通信あり");
+        traffic.setVisibility(View.VISIBLE);
+        panel.post(() -> { if (attached) move(); });
+        handler.postAtTime(() -> {
+            if (row.getParent() != trafficRows) return;
+            trafficRows.removeView(row);
+            if (trafficRows.getChildCount() == 0) traffic.setVisibility(View.GONE);
+            if (attached) panel.post(() -> { if (attached) move(); });
+        }, trafficToken, SystemClock.uptimeMillis() + TRAFFIC_VISIBLE_MS);
     }
 
     private void resetWatch() {
@@ -395,11 +449,9 @@ public class PacketOverlayService extends Service implements LifecycleOwner {
         }
         long tx, rx;
         Map<Integer, long[]> next = new HashMap<>();
-        String endpoint = null;
-        long newest = Long.MIN_VALUE;
-        int newestId = Integer.MIN_VALUE;
+        List<TrafficEvent> events = new ArrayList<>();
         boolean sameTarget = watchRegister == reg && watchPackage.equals(pkg) && watchUid == app.uid;
-        // Copy the counters and select the latest actually changed connection under the register lock.
+        // Copy counters and collect actually changed connections under the register lock.
         synchronized (reg) {
             AppStats stats = reg.getAppStats(app.uid);
             tx = stats == null ? 0 : stats.sentBytes;
@@ -413,12 +465,10 @@ public class PacketOverlayService extends Service implements LifecycleOwner {
                 boolean known = old != null && old[0] == conn.first_seen;
                 boolean changed = known ? conn.sent_bytes > old[1] || conn.rcvd_bytes > old[2]
                         : conn.sent_bytes > 0 || conn.rcvd_bytes > 0;
-                if (changed && (conn.last_seen > newest
-                        || (conn.last_seen == newest && conn.incr_id > newestId))) {
-                    newest = conn.last_seen;
-                    newestId = conn.incr_id;
-                    endpoint = protocolLabel(conn) + "  " +
-                            (conn.dst_ip == null || conn.dst_ip.isEmpty() ? "IP不明" : conn.dst_ip);
+                if (sameTarget && changed) {
+                    events.add(new TrafficEvent(conn.last_seen, conn.incr_id,
+                            protocolLabel(conn) + "  " +
+                            (conn.dst_ip == null || conn.dst_ip.isEmpty() ? "IP不明" : conn.dst_ip)));
                 }
             }
         }
@@ -440,19 +490,16 @@ public class PacketOverlayService extends Service implements LifecycleOwner {
         if (!changed) return;
 
         // A connection may have already left the bounded register. Do not guess its endpoint.
-        String title = watchLabel + "：通信あり";
-        String detail = endpoint == null ? "プロトコル・接続先IP不明" : endpoint;
-        SpannableString text = new SpannableString(title + "\n" + detail);
-        text.setSpan(new RelativeSizeSpan(0.83f), title.length() + 1, text.length(),
-                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        traffic.setText(text);
-        traffic.setBackgroundColor(0xFF177B46);
-        if (traffic.getVisibility() != View.VISIBLE) {
-            traffic.setVisibility(View.VISIBLE);
-            panel.post(() -> { if (attached) move(); });
+        if (events.isEmpty()) events.add(new TrafficEvent(0, 0, "プロトコル・接続先IP不明"));
+        events.sort(Comparator.comparingLong((TrafficEvent e) -> e.time).thenComparingInt(e -> e.id));
+        int first = Math.max(0, events.size() - MAX_TRAFFIC_ROWS);
+        long now = SystemClock.uptimeMillis();
+        for (int i = first; i < events.size(); i++) {
+            final String endpoint = events.get(i).endpoint;
+            // Stagger simultaneous observations without creating an unbounded backlog.
+            handler.postAtTime(() -> showTrafficEvent(endpoint), trafficToken,
+                    now + (i - first) * TRAFFIC_STAGGER_MS);
         }
-        handler.removeCallbacks(dismissTraffic);
-        handler.postDelayed(dismissTraffic, TRAFFIC_VISIBLE_MS);
     }
 
     private static String protocolLabel(ConnectionDescriptor conn) {
