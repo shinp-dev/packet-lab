@@ -38,6 +38,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.regex.Pattern;
 import androidx.core.content.ContextCompat;
 import androidx.lifecycle.Lifecycle;
 import androidx.lifecycle.LifecycleOwner;
@@ -62,8 +63,10 @@ public class PacketOverlayService extends Service implements LifecycleOwner {
     private ConnectionsRegister watchRegister;
     private String watchPackage = "";
     private int watchUid = -1;
-    private static final long TRAFFIC_VISIBLE_MS = 1200;
+    private static final long TRAFFIC_VISIBLE_MS = 1500;
     private static final int MAX_TRAFFIC_ROWS = 5;
+    private static final Pattern HOST_NAME = Pattern.compile(
+            "(?i)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?\\.?");
     private static final long TRAFFIC_STAGGER_MS = 65;
     private final Object trafficToken = new Object();
     private long watchTx, watchRx;
@@ -72,10 +75,12 @@ public class PacketOverlayService extends Service implements LifecycleOwner {
         final long time;
         final int id;
         final String endpoint;
-        TrafficEvent(long time, int id, String endpoint) {
+        final String domain;
+        TrafficEvent(long time, int id, String endpoint, String domain) {
             this.time = time;
             this.id = id;
             this.endpoint = endpoint;
+            this.domain = domain;
         }
     }
     private String watchLabel = "";
@@ -388,7 +393,7 @@ public class PacketOverlayService extends Service implements LifecycleOwner {
         }
     }
 
-    private void showTrafficEvent(String endpoint) {
+    private void showTrafficEvent(TrafficEvent event) {
         if (!attached || stopping || !CaptureService.isServiceActive()
                 || !watchPackage.equals(PacketLabConfig.watchedPackage(this))
                 || watchRegister != CaptureService.getConnsRegister()) return;
@@ -396,12 +401,27 @@ public class PacketOverlayService extends Service implements LifecycleOwner {
             // Expiration callbacks for removed rows are harmless and still bounded in time.
             trafficRows.removeViewAt(trafficRows.getChildCount() - 1);
         }
-        TextView row = new TextView(this);
-        row.setTextColor(Color.WHITE);
-        row.setTextSize(10);
-        row.setMaxLines(2);
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.VERTICAL);
         row.setPadding(dp(5), dp(2), dp(5), dp(2));
-        row.setText(endpoint);
+        TextView endpoint = new TextView(this);
+        endpoint.setTextColor(Color.WHITE);
+        endpoint.setTextSize(10);
+        endpoint.setMaxLines(2);
+        endpoint.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        endpoint.setIncludeFontPadding(false);
+        endpoint.setText(event.endpoint);
+        row.addView(endpoint, new LinearLayout.LayoutParams(-1, -2));
+        if (!event.domain.isEmpty()) {
+            TextView domain = new TextView(this);
+            domain.setTextColor(0xFFD2F0DF);
+            domain.setTextSize(10);
+            domain.setSingleLine(true);
+            domain.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+            domain.setIncludeFontPadding(false);
+            domain.setText(event.domain);
+            row.addView(domain, new LinearLayout.LayoutParams(-1, -2));
+        }
         GradientDrawable bg = new GradientDrawable();
         bg.setCornerRadius(dp(3));
         bg.setColor(0xFF177B46);
@@ -468,7 +488,8 @@ public class PacketOverlayService extends Service implements LifecycleOwner {
                 if (sameTarget && changed) {
                     events.add(new TrafficEvent(conn.last_seen, conn.incr_id,
                             protocolLabel(conn) + "  " +
-                            (conn.dst_ip == null || conn.dst_ip.isEmpty() ? "IP不明" : conn.dst_ip)));
+                            (conn.dst_ip == null || conn.dst_ip.isEmpty() ? "IP不明" : conn.dst_ip),
+                            domainLabel(conn)));
                 }
             }
         }
@@ -490,16 +511,25 @@ public class PacketOverlayService extends Service implements LifecycleOwner {
         if (!changed) return;
 
         // A connection may have already left the bounded register. Do not guess its endpoint.
-        if (events.isEmpty()) events.add(new TrafficEvent(0, 0, "プロトコル・接続先IP不明"));
+        if (events.isEmpty()) events.add(new TrafficEvent(0, 0, "プロトコル・接続先IP不明", ""));
         events.sort(Comparator.comparingLong((TrafficEvent e) -> e.time).thenComparingInt(e -> e.id));
         int first = Math.max(0, events.size() - MAX_TRAFFIC_ROWS);
         long now = SystemClock.uptimeMillis();
         for (int i = first; i < events.size(); i++) {
-            final String endpoint = events.get(i).endpoint;
+            final TrafficEvent event = events.get(i);
             // Stagger simultaneous observations without creating an unbounded backlog.
-            handler.postAtTime(() -> showTrafficEvent(endpoint), trafficToken,
+            handler.postAtTime(() -> showTrafficEvent(event), trafficToken,
                     now + (i - first) * TRAFFIC_STAGGER_MS);
         }
+    }
+
+    // The upstream connection tab uses info as its remote label. Only show a
+    // plausible dotted hostname here, not arbitrary protocol metadata or an IP.
+    // This is already captured information: no DNS lookup is performed.
+    private static String domainLabel(ConnectionDescriptor conn) {
+        String host = conn.info == null ? "" : conn.info.trim();
+        if (host.length() > 254 || host.equalsIgnoreCase(conn.dst_ip)) return "";
+        return HOST_NAME.matcher(host).matches() ? host : "";
     }
 
     private static String protocolLabel(ConnectionDescriptor conn) {
