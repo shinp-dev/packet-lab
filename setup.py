@@ -76,6 +76,13 @@ def prepare(skip_submodules=False):
         ('        CaptureSettings settings = new CaptureSettings(this, mPrefs);\n        settings.input_pcap_path = input_pcap_path;',
          '        CaptureSettings settings = input_pcap_path == null\n                ? com.emanuelef.remote_capture.PacketLabConfig.localSettings(this)\n                : new CaptureSettings(this, mPrefs);\n        settings.input_pcap_path = input_pcap_path;'),
     ])
+    # Independent, idempotent additions also work on a previously prepared checkout.
+    patch(main, [
+        ('        menu.add(0, 0x504c0002, 101, "記録モード設定");',
+         '        menu.add(0, 0x504c0002, 101, "記録モード設定");\n        menu.add(0, 0x504c0003, 102, "通信通知するアプリ");'),
+        ('        if (id == 0x504c0001) {',
+         '        if (id == 0x504c0003) {\n            com.emanuelef.remote_capture.PacketLabConfig.chooseWatch(this);\n            return true;\n        }\n        if (id == 0x504c0001) {'),
+    ])
     # MainActivity's normal start action uses the same local-only policy as the overlay.
     p = TARGET / main
     data = p.read_text(encoding="utf-8")
