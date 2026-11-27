@@ -62,7 +62,7 @@ public class PacketOverlayService extends Service implements LifecycleOwner {
     private ConnectionsRegister watchRegister;
     private String watchPackage = "";
     private int watchUid = -1;
-    private static final long TRAFFIC_VISIBLE_MS = 700;
+    private static final long TRAFFIC_VISIBLE_MS = 1200;
     private static final int MAX_TRAFFIC_ROWS = 5;
     private static final long TRAFFIC_STAGGER_MS = 65;
     private final Object trafficToken = new Object();
