@@ -227,7 +227,7 @@ public final class PacketLabConfig {
                 .setNegativeButton(android.R.string.cancel, null)
                 .create();
         list.setOnItemClickListener((parent, view, position, id) -> {
-            WatchApp item = adapter.getItem(position);
+            WatchApp item = visible.get(position);
             // Revalidate after the dialog has been open, e.g. after package changes.
             try {
                 ApplicationInfo current = pm.getApplicationInfo(item.info.packageName, 0);
