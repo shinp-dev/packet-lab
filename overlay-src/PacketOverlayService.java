@@ -28,6 +28,10 @@ import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.Toast;
+import android.widget.TextView;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageManager;
+import com.emanuelef.remote_capture.model.AppStats;
 import androidx.core.content.ContextCompat;
 import androidx.lifecycle.Lifecycle;
 import androidx.lifecycle.LifecycleOwner;
@@ -45,6 +49,13 @@ public class PacketOverlayService extends Service implements LifecycleOwner {
     private WindowManager wm;
     private WindowManager.LayoutParams params;
     private LinearLayout panel;
+    private LinearLayout controls;
+    private TextView traffic;
+    private ConnectionsRegister watchRegister;
+    private String watchPackage = "";
+    private int watchUid = -1;
+    private long watchTx, watchRx, trafficUntil;
+    private String watchLabel = "";
     private Button record;
     private Button close;
     private boolean started;
@@ -180,12 +191,15 @@ public class PacketOverlayService extends Service implements LifecycleOwner {
     private void add(Button b, int width) {
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(width), dp(44));
         lp.setMargins(dp(2), 0, dp(2), 0);
-        panel.addView(b, lp);
+        controls.addView(b, lp);
     }
 
     private void createPanel() {
         panel = new LinearLayout(this);
-        panel.setOrientation(LinearLayout.HORIZONTAL);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        controls = new LinearLayout(this);
+        controls.setOrientation(LinearLayout.HORIZONTAL);
+        panel.addView(controls);
         panel.setPadding(dp(3), dp(3), dp(3), dp(3));
         GradientDrawable bg = new GradientDrawable();
         bg.setColor(0xE6222B35);
@@ -204,6 +218,14 @@ public class PacketOverlayService extends Service implements LifecycleOwner {
         add(record, 94);
         add(results, 54);
         add(close, 36);
+        traffic = new TextView(this);
+        traffic.setTextColor(Color.WHITE);
+        traffic.setTextSize(12);
+        traffic.setMaxLines(2);
+        traffic.setPadding(dp(8), dp(4), dp(8), dp(4));
+        traffic.setMaxWidth(dp(228));
+        traffic.setVisibility(View.GONE);
+        panel.addView(traffic, new LinearLayout.LayoutParams(dp(236), LinearLayout.LayoutParams.WRAP_CONTENT));
         params = new WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
@@ -320,10 +342,80 @@ public class PacketOverlayService extends Service implements LifecycleOwner {
                 return;
             }
             render();
+            updateTraffic();
             if (!closing || CaptureService.isServiceActive())
                 handler.postDelayed(this, 500);
         }
     };
+
+    private void hideTraffic() {
+        trafficUntil = 0;
+        if (traffic != null && traffic.getVisibility() != View.GONE) {
+            traffic.setVisibility(View.GONE);
+            panel.post(() -> { if (attached) move(); });
+        }
+    }
+
+    private void resetWatch() {
+        watchRegister = null;
+        watchPackage = "";
+        watchUid = -1;
+        watchTx = watchRx = 0;
+        hideTraffic();
+    }
+
+    private void updateTraffic() {
+        if (!attached || stopping || !CaptureService.isServiceActive()
+                || CaptureService.isReadingFromPcapFile()) {
+            resetWatch();
+            return;
+        }
+        String pkg = PacketLabConfig.watchedPackage(this);
+        ConnectionsRegister reg = CaptureService.getConnsRegister();
+        if (pkg.isEmpty() || reg == null) { resetWatch(); return; }
+        PackageManager pm = getPackageManager();
+        ApplicationInfo app;
+        try {
+            app = pm.getApplicationInfo(pkg, 0);
+            if (!PacketLabConfig.uniqueUid(pm, pkg, app.uid)) { resetWatch(); return; }
+        } catch (PackageManager.NameNotFoundException | RuntimeException e) {
+            resetWatch();
+            return;
+        }
+        long tx, rx;
+        // Upstream writers synchronize on this register. Copy the counters under that lock.
+        synchronized (reg) {
+            AppStats stats = reg.getAppStats(app.uid);
+            tx = stats == null ? 0 : stats.sentBytes;
+            rx = stats == null ? 0 : stats.rcvdBytes;
+        }
+        if (watchRegister != reg || !watchPackage.equals(pkg) || watchUid != app.uid
+                || tx < watchTx || rx < watchRx) {
+            // Baseline a newly selected app/session; never announce historical traffic.
+            watchRegister = reg;
+            watchPackage = pkg;
+            watchUid = app.uid;
+            watchLabel = pm.getApplicationLabel(app).toString();
+            watchTx = tx;
+            watchRx = rx;
+            hideTraffic();
+            return;
+        }
+        boolean sent = tx > watchTx, received = rx > watchRx;
+        watchTx = tx; watchRx = rx;
+        long now = SystemClock.elapsedRealtime();
+        if (sent || received) {
+            trafficUntil = now + 1800;
+            traffic.setText(watchLabel + "：通信あり\n" + (sent && received ? "送受信" : sent ? "送信" : "受信"));
+            traffic.setBackgroundColor(0xFF177B46);
+            if (traffic.getVisibility() != View.VISIBLE) {
+                traffic.setVisibility(View.VISIBLE);
+                panel.post(() -> { if (attached) move(); });
+            }
+        } else if (now >= trafficUntil) {
+            hideTraffic();
+        }
+    }
 
     private void render() {
         if (!attached) return;
@@ -372,6 +464,7 @@ public class PacketOverlayService extends Service implements LifecycleOwner {
     @Override
     public void onDestroy() {
         handler.removeCallbacksAndMessages(null);
+        resetWatch();
         startResult(false);
         lifecycle.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY);
         if (attached) {
